@@ -1,0 +1,121 @@
+version: "3.9"
+
+name: crm-platform
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: crm_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-crm}
+      POSTGRES_USER: ${POSTGRES_USER:-crm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crm}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crm} -d ${POSTGRES_DB:-crm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: crm_redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: node:20-alpine
+    container_name: crm_api
+    restart: unless-stopped
+    working_dir: /workspace
+    command: >
+      sh -c "corepack enable &&
+             if [ -f package.json ]; then npm install && npm run prisma:migrate:deploy && npm run dev:api; else echo 'apps/api not scaffolded yet'; tail -f /dev/null; fi"
+    env_file:
+      - ../.env
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm}@postgres:5432/${POSTGRES_DB:-crm}?schema=public
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "${API_PORT:-3000}:3000"
+    volumes:
+      - ..:/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: node:20-alpine
+    container_name: crm_worker
+    restart: unless-stopped
+    working_dir: /workspace
+    command: >
+      sh -c "corepack enable &&
+             if [ -f package.json ]; then npm install && npm run dev:worker; else echo 'packages/queue not scaffolded yet'; tail -f /dev/null; fi"
+    env_file:
+      - ../.env
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm}@postgres:5432/${POSTGRES_DB:-crm}?schema=public
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ..:/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    image: node:20-alpine
+    container_name: crm_web
+    restart: unless-stopped
+    working_dir: /workspace
+    command: >
+      sh -c "corepack enable &&
+             if [ -f package.json ]; then npm install && npm run dev:web -- --host 0.0.0.0 --port 5173; else echo 'apps/web not scaffolded yet'; tail -f /dev/null; fi"
+    env_file:
+      - ../.env
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      VITE_API_BASE_URL: http://localhost:${API_PORT:-3000}
+      VITE_SOCKET_URL: http://localhost:${API_PORT:-3000}
+    ports:
+      - "${WEB_PORT:-5173}:5173"
+    volumes:
+      - ..:/workspace
+    depends_on:
+      api:
+        condition: service_started
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: crm_nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api:
+        condition: service_started
+      web:
+        condition: service_started
+
+volumes:
+  postgres_data:
